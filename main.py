@@ -1,14 +1,21 @@
+import base64
 import os
 from datetime import datetime
 from typing import List, Optional
 
+import httpx
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Column
 from sqlalchemy.types import LargeBinary
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
+load_dotenv()
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./stories.db")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 engine = create_engine(
     DATABASE_URL,
@@ -77,6 +84,22 @@ def validate_image(file: UploadFile) -> None:
         )
 
 
+async def send_telegram_message(message: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "disable_web_page_preview": True,
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(url, json=payload)
+        response.raise_for_status()
+
+
 @app.post("/stories", response_model=StoryCreateResponse)
 async def upload_story(
     text: str = Form(...),
@@ -100,6 +123,14 @@ async def upload_story(
     session.commit()
     session.refresh(story)
 
+    try:
+        await send_telegram_message(
+            f"New story uploaded\n\nID: {story.id}\nText: {story.text}"
+        )
+    except Exception:
+        # Keep upload successful even if Telegram fails.
+        pass
+
     return StoryCreateResponse(id=story.id)
 
 
@@ -114,8 +145,6 @@ def get_story(story_id: int, session: Session = Depends(get_session)):
     story = session.get(Story, story_id)
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
-
-    import base64
 
     image_base64 = base64.b64encode(story.image_data).decode("utf-8")
 
